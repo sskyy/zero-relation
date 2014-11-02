@@ -64,7 +64,7 @@ function generateAfterUpdateCallback(modelName, relationDef, models) {
       relationModels = [relationModels]
     }
 
-    console.log("===========",relationModels,_.map(relationModels,function( relationModel){ return _.isObject( relationModel) ? relationModel.id : relationModel }))
+    //console.log("===========",relationModels,_.map(relationModels,function( relationModel){ return _.isObject( relationModel) ? relationModel.id : relationModel }))
     var relationsIds = _.compact(_.map(relationModels,function( relationModel){ return _.isObject( relationModel) ? relationModel.id : relationModel }))
 
     return Promise.all( updatedModels.map(function( updatedModel){
@@ -77,8 +77,8 @@ function generateAfterUpdateCallback(modelName, relationDef, models) {
           return !id || existsIds.indexOf( id) ==-1
         })
 
-        console.log( records)
-        console.log( relationsIds,notExistsRelationModels, needDeleteRecordIds, existsIds)
+        //console.log( records)
+        //console.log( relationsIds,notExistsRelationModels, needDeleteRecordIds, existsIds)
         if( needDeleteRecordIds.length ){
           return models[relationCollection].destroy({id: needDeleteRecordIds}).then(function(){
             return buildRelation(notExistsRelationModels,relationDef,relationCollection,modelName,updatedModel,bus)
@@ -197,7 +197,7 @@ function generateAfterModelFindHandler(modelName, relationDef,models){
                 record[relationDef.name] = relationModels[theRelation[relationDef.model]]
               }
             }
-            console.log( record)
+            //console.log("================>", record)
           })
         })
     })
@@ -261,8 +261,6 @@ var relationModule = {
         models = root.dep.model.models
 
       root.dep.model.expand(root)
-
-      console.log( root.indexes )
 
       _.forEach(root.indexes, function (relationDefs, modelName) {
         _.forEach(relationDefs, function (relationDef) {
