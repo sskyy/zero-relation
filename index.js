@@ -10,18 +10,19 @@ var nodes = {}
 
 function makeCollectionName( modelName, relationDef ){
   var ns = []
-  if( !relationDef.reverseTo ){
+  if( !relationDef.isMaster ){
     ns = ns.concat([modelName,relationDef.name])
     if( relationDef.reverse){
       ns = ns.concat([relationDef.model,relationDef.reverse.name])
     }
   }else{
-      ns = ns.concat([relationDef.model,relationDef.reverseTo,modelName,relationDef.name])
+      ns = ns.concat([relationDef.model,relationDef.reverse.name,modelName,relationDef.name])
   }
   return ns.join('_')
 }
 
-function generateAfterCreateCallback(modelName, relationDef) {
+function generateAfterCreateCallback(modelName, relationDef, models) {
+  var root = this
   return function handlerIndexAfterNodeCreate( newModel ) {
     if( !newModel[relationDef.name] ) return
 
@@ -40,11 +41,12 @@ function generateAfterCreateCallback(modelName, relationDef) {
       relationModels = [relationModels]
     }
 
-    return buildRelation(relationModels,relationDef,relationCollection,modelName,newModel,bus)
+    return buildRelation.call(root,relationModels,relationDef,relationCollection,modelName,newModel,bus, models)
   }
 }
 
 function generateAfterUpdateCallback(modelName, relationDef, models) {
+  var root = this
   return function handlerRelationAfterModelUpdate( updatedModels, criteria, updateObj ) {
 
     if( !updateObj[relationDef.name] ) return
@@ -60,31 +62,29 @@ function generateAfterUpdateCallback(modelName, relationDef, models) {
     }
 
     //we make it an array just for convinience to use promise `all` method
-    if( !_.isArray( relationModels ) ){
-      relationModels = [relationModels]
-    }
+    relationModels = [].concat(relationModels)
 
     //console.log("===========",relationModels,_.map(relationModels,function( relationModel){ return _.isObject( relationModel) ? relationModel.id : relationModel }))
-    var relationsIds = _.compact(_.map(relationModels,function( relationModel){ return _.isObject( relationModel) ? relationModel.id : relationModel }))
+    var relationsIds = _.uniq(_.compact(_.map(relationModels,function( relationModel){ return _.isObject( relationModel) ? relationModel.id : relationModel })).map(function(r){return r.toString()}))
 
     return Promise.all( updatedModels.map(function( updatedModel){
 
       return models[relationCollection].find(_.zipObject([modelName],[ updatedModel.id])).then(function( records ){
-        var existsIds = _.pluck( records, relationDef.model )
-        var needDeleteRecordIds = _.pluck(_.filter( records, function( record){ return relationsIds.indexOf(record[relationDef.model].toString())==-1}),"id")
+        var existsIds = _.pluck( records, relationDef.model).map(function(r){return r.toString()})
+        var needDeleteRecordIds = _.without.apply( _, [existsIds].concat( relationsIds) )
         var notExistsRelationModels = _.filter(relationModels, function(model){
           var id = _.isObject(model) ? model.id : model
-          return !id || existsIds.indexOf( id) ==-1
+          return !id || existsIds.indexOf( id.toString()) ==-1
         })
 
         //console.log( records)
         //console.log( relationsIds,notExistsRelationModels, needDeleteRecordIds, existsIds)
         if( needDeleteRecordIds.length ){
           return models[relationCollection].destroy({id: needDeleteRecordIds}).then(function(){
-            return buildRelation(notExistsRelationModels,relationDef,relationCollection,modelName,updatedModel,bus)
+            return buildRelation.call(root,notExistsRelationModels,relationDef,relationCollection,modelName,updatedModel,bus, models)
           })
         }else{
-          return buildRelation(notExistsRelationModels,relationDef,relationCollection,modelName,updatedModel,bus)
+          return buildRelation.call(root,notExistsRelationModels,relationDef,relationCollection,modelName,updatedModel,bus, models)
         }
 
       })
@@ -92,23 +92,27 @@ function generateAfterUpdateCallback(modelName, relationDef, models) {
   }
 }
 
-function buildRelation(relationModels,relationDef,relationCollection,modelName,modelIns,bus ){
+
+function buildRelation(relationModels,relationDef,relationCollection,modelName,modelIns,bus, models ){
   return Promise.all( relationModels.map(function ( relationModel ) {
     if( _.isString(relationModel) || _.isNumber(relationModel) ){
       relationModel = {id : relationModel}
     }
 
     //may need to build an new relation object
-    //validate read write auth
-    if ( !relationModel.id && _.find(relationDef.auth,'write')) {
+    //validate read write auth and create a new relation object
+    if ( !relationModel.id && relationDef.auth.indexOf('write') !==-1 ) {
       logger.log("relation","creating new relation object", relationDef, relationModel )
 
-      return bus.fire( relationModel.model+".create", relationModel).then(function ( savedRelationModal) {
+      return bus.fire( relationDef.model+".create", relationModel).then(function ( fireResult) {
+        var savedRelationModal =fireResult['model.create.'+relationDef.model]
         logger.log("relation"," create new relation object done ", savedRelationModal)
         //save the relation to relation collection
-        return bus.fire( relationCollection+".create", _.zipObject([modelName,relationDef.model],[modelIns.id,savedRelationModal.id]))
+        return createRelationCollectionAndUpdateCaches(savedRelationModal,relationDef,relationCollection,modelName,modelIns,bus, models)
+        //return bus.fire( relationCollection+".create", _.zipObject([modelName,relationDef.model],[modelIns.id,savedRelationModal.id]))
       })
 
+    //user lod relation object
     }else if( relationModel.id){
       logger.log("index","use old relation", relationDef.name)
 
@@ -116,16 +120,20 @@ function buildRelation(relationModels,relationDef,relationCollection,modelName,m
       if( relationDef.reverse && !relationDef.reverse.multiple){
         var findRelationObj = {}
         findRelationObj[relationDef.model] = relationModel.id
-        return bus.fire( relationCollection+".findOne", findRelationObj).then(function( foundRelation){
+        return bus.fire( relationCollection+".findOne", findRelationObj).then(function( fireResult){
+          var foundRelation = fireResult['model.findOne'+relationCollection]
           if( foundRelation ){
             return logger.error("relation already exists", foundRelation)
           }else{
-            return bus.fire( relationCollection+".create", _.zipObject([modelName,relationDef.model],[modelIns.id,relationModel.id]))
+            return createRelationCollectionAndUpdateCaches(relationModel,relationDef,relationCollection,modelName,modelIns,bus, models)
+            //return bus.fire( relationCollection+".create", _.zipObject([modelName,relationDef.model],[modelIns.id,relationModel.id]))
           }
         })
       }else{
-        return bus.fire( relationCollection+".create", _.zipObject([modelName,relationDef.model],[modelIns.id,relationModel.id]))
+        return createRelationCollectionAndUpdateCaches(relationModel,relationDef,relationCollection,modelName,modelIns,bus, models)
+        //return bus.fire( relationCollection+".create", _.zipObject([modelName,relationDef.model],[modelIns.id,relationModel.id]))
       }
+
     }else{
       //ignore but continue
       return logger.error("you do not have right to create new relation object", relationModel)
@@ -133,6 +141,25 @@ function buildRelation(relationModels,relationDef,relationCollection,modelName,m
   }).filter( isPromiseAlike ))
 }
 
+
+function createRelationCollectionAndUpdateCaches( relationModel,relationDef,relationCollection,modelName,modelIns,bus, models){
+  //create relation record
+  if( !relationDef.reverse ) console.log("==================no reverse",relationDef)
+  return models[relationDef.model].findOne( relationModel.id).then(function( relationModel){
+    return bus.fire( relationCollection+".create", _.zipObject([modelName,relationDef.model],[modelIns.id,relationModel.id])).then(function(createResult){
+
+      var updateModelIns = _.pick( modelIns, [relationDef.name])
+      updateModelIns[relationDef.name] = _.uniq((updateModelIns[relationDef.name]||[]).concat(relationModel.id))
+      //update cache to model
+      return models[modelName].update(modelIns.id,updateModelIns).then(function(){
+        var updateRelationModel = _.pick( relationModel,[relationDef.reverse.name])
+        updateRelationModel[relationDef.reverse.name] = _.uniq( (updateRelationModel[relationDef.reverse.name]||[]).concat(relationModel.id))
+        //update cache to relation model
+        return models[relationDef.model].update( relationModel.id, updateRelationModel)
+      })
+    })
+  })
+}
 
 
 function generateBeforeModelFindHandler( modelName, relationDef, models){
@@ -161,20 +188,21 @@ function generateBeforeModelFindHandler( modelName, relationDef, models){
       replacePromise.block = true
       return replacePromise
     },
+    "name" : "replaceRelation"+relationDef.name.replace(/^(\w)/,function(r){ return r.toUpperCase()})+"QueryWithIds",
     "first" : true
   }
 }
 
 function generateAfterModelFindHandler(modelName, relationDef,models){
   var relationCollection = makeCollectionName(modelName,relationDef)
+  return {
+    "function" : function fetchRelationObjects( records, criteria ){
+      var bus = this
 
-  return function fetchRelationObjects( records, criteria ){
-    var bus = this
+      if( !criteria.populate || criteria.populate.split(",").indexOf(relationDef.name) ==-1) return
 
-    if( !criteria.populate || criteria.populate.split(",").indexOf(relationDef.name) ==-1) return
-
-    var ids = _.flatten(_.pluck( (_.isArray(records) ? records : [records]), "id" ))
-    return bus.fire(relationCollection+".find", _.zipObject([modelName],[ids])).then(function( relationEventResults ){
+      var ids = _.flatten(_.pluck( (_.isArray(records) ? records : [records]), "id" ))
+      return bus.fire(relationCollection+".find", _.zipObject([modelName],[ids])).then(function( relationEventResults ){
         var relations = relationEventResults['model.find.'+relationCollection]
         var relationIds = _.pluck( relations, relationDef.model )
 
@@ -197,10 +225,12 @@ function generateAfterModelFindHandler(modelName, relationDef,models){
                 record[relationDef.name] = relationModels[theRelation[relationDef.model]]
               }
             }
-            //console.log("================>", record)
           })
         })
-    })
+      })
+    },
+    "name" : "fetchRelation" + relationDef.name.replace(/^\w/,function(r){return r.toUpperCase()})
+
 
   }
 }
@@ -226,17 +256,21 @@ var relationModule = {
               //model : relation must have model
               name :attrName,
               auth : ['read'],
-              multiple : false
+              multiple : false,
+              isMaster : true
             })
 
             root.indexes[model.identity] = (root.indexes[model.identity] || []).concat(relationDef)
 
             if( relationDef.reverse ){
-              var reverseRelationDef = _.defaults(relationDef.reverse,{
+              var reverseRelationDef = _.defaults(_.cloneDeep(relationDef.reverse),{
                 model : model.identity,
                 //name : reverse must have a name
                 auth : ['read'],
-                reverseTo : attrName,
+                reverse : {
+                  name : relationDef.name,
+                  model : relationDef.model
+                },
                 multiple : false
               })
               root.indexes[relationDef.model] = (root.indexes[relationDef.model]||[]).concat(reverseRelationDef)
@@ -265,11 +299,11 @@ var relationModule = {
       _.forEach(root.indexes, function (relationDefs, modelName) {
         _.forEach(relationDefs, function (relationDef) {
 
-          root.dep.bus.on(modelName + '.create.after', generateAfterCreateCallback(modelName, relationDef, models))
-          root.dep.bus.on(modelName + '.update.after',generateAfterUpdateCallback(modelName,relationDef, models ))
-          root.dep.bus.on(modelName + '.find', generateBeforeModelFindHandler(modelName, relationDef, models))
-          root.dep.bus.on(modelName + '.find.after', generateAfterModelFindHandler(modelName, relationDef, models))
-          root.dep.bus.on(modelName + '.findOne.after', generateAfterModelFindHandler(modelName, relationDef, models))
+          root.dep.bus.on(modelName + '.create.after', generateAfterCreateCallback.call(root,modelName, relationDef, models))
+          root.dep.bus.on(modelName + '.update.after',generateAfterUpdateCallback.call(root,modelName,relationDef, models ))
+          root.dep.bus.on(modelName + '.find', generateBeforeModelFindHandler.call(root,modelName, relationDef, models))
+          root.dep.bus.on(modelName + '.find.after', generateAfterModelFindHandler.call(root,modelName, relationDef, models))
+          root.dep.bus.on(modelName + '.findOne.after', generateAfterModelFindHandler.call(root,modelName, relationDef, models))
         })
       })
     },
