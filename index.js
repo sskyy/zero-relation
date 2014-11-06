@@ -50,7 +50,7 @@ function generateAfterUpdateCallback(modelName, relationDef, models) {
   return function handlerRelationAfterModelUpdate( updatedModels, criteria, updateObj ) {
 
     if( !updateObj[relationDef.name] ) return
-    logger.log("updating relation", relationDef.name, updateObj)
+    logger.log("updating relation", relationDef.name)
 
     var relationModels = updateObj[relationDef.name],
       relationCollection = makeCollectionName(modelName, relationDef),
@@ -102,17 +102,17 @@ function buildRelation(relationModels,relationDef,relationCollection,modelName,m
     //may need to build an new relation object
     //validate read write auth and create a new relation object
     if ( !relationModel.id && relationDef.auth.indexOf('write') !==-1 ) {
-      logger.log("relation","creating new relation object", relationDef, relationModel )
+      //logger.log("relation","creating new relation object", relationDef, relationModel )
 
       return bus.fire( relationDef.model+".create", relationModel).then(function ( fireResult) {
         var savedRelationModal =fireResult['model.create.'+relationDef.model]
-        logger.log("relation"," create new relation object done ", savedRelationModal)
+        //logger.log("relation"," create new relation object done ", savedRelationModal)
         //save the relation to relation collection
         return createRelationCollectionAndUpdateCaches(savedRelationModal,relationDef,relationCollection,modelName,modelIns,bus, models)
         //return bus.fire( relationCollection+".create", _.zipObject([modelName,relationDef.model],[modelIns.id,savedRelationModal.id]))
       })
 
-    //user lod relation object
+    //user exist relation object
     }else if( relationModel.id){
       logger.log("index","use old relation", relationDef.name)
 
@@ -144,17 +144,25 @@ function buildRelation(relationModels,relationDef,relationCollection,modelName,m
 
 function createRelationCollectionAndUpdateCaches( relationModel,relationDef,relationCollection,modelName,modelIns,bus, models){
   //create relation record
-  if( !relationDef.reverse ) console.log("==================no reverse",relationDef)
   return models[relationDef.model].findOne( relationModel.id).then(function( relationModel){
     return bus.fire( relationCollection+".create", _.zipObject([modelName,relationDef.model],[modelIns.id,relationModel.id])).then(function(createResult){
 
       var updateModelIns = _.pick( modelIns, [relationDef.name])
-      updateModelIns[relationDef.name] = _.uniq((updateModelIns[relationDef.name]||[]).concat(relationModel.id))
+      if( relationDef.multiple ){
+        updateModelIns[relationDef.name] = _.uniq((updateModelIns[relationDef.name]||[]).concat(relationModel.id))
+      }else{
+        updateModelIns[relationDef.name] = relationModel.id
+      }
       //update cache to model
       return models[modelName].update(modelIns.id,updateModelIns).then(function(){
         var updateRelationModel = _.pick( relationModel,[relationDef.reverse.name])
-        updateRelationModel[relationDef.reverse.name] = _.uniq( (updateRelationModel[relationDef.reverse.name]||[]).concat(relationModel.id))
         //update cache to relation model
+
+        if( relationDef.reverse.multiple ) {
+          updateRelationModel[relationDef.reverse.name] = _.uniq((updateRelationModel[relationDef.reverse.name] || []).concat(relationModel.id))
+        }else{
+          updateRelationModel[relationDef.reverse.name] = relationModel.id
+        }
         return models[relationDef.model].update( relationModel.id, updateRelationModel)
       })
     })
