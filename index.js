@@ -21,152 +21,181 @@ function makeCollectionName( modelName, relationDef ){
   return ns.join('_')
 }
 
+function standardRelationModels( models){
+  return models.map(function( m){
+    if(_.isString( m)|| _.isNumber(m)){
+      return {id: m}
+    }else{
+      return m
+    }
+  })
+}
+
+
 function generateAfterCreateCallback(modelName, relationDef, models) {
   var root = this
   return function handlerIndexAfterNodeCreate( newModel ) {
     if( !newModel[relationDef.name] ) return
 
     logger.log("detecting relation", relationDef.name)
-    var relationModels = newModel[relationDef.name],
+    var relationModels = standardRelationModels([].concat(newModel[relationDef.name])),
       relationCollection = makeCollectionName(modelName, relationDef),
       bus = this
 
     //1. validate multiple
-    if( !relationDef.multiple && _.isArray( relationModels )) {
+    if( !relationDef.multiple && relationModels.length !== 1) {
       return bus.error(406, 'relation not allow multiple for ' + relationDef.name + ' in ' + modelName)
     }
 
-    //we make it an array just for convinience to use promise `all` method
-    if( !_.isArray( relationModels ) ){
-      relationModels = [relationModels]
+    if( relationDef.auth.indexOf( 'write') == -1 ){
+      relationModels = _.filter(relationModels,"id")
     }
 
-    return buildRelation.call(root,relationModels,relationDef,relationCollection,modelName,newModel,bus, models)
+
+    return checkRelationMultiple.call(relationDef.reverse.multiple, relationCollection, relationDef.model, relationModels, models).then(function(){
+      return createRelationModels.call(bus,  relationDef, relationModels, models).then(function( savedRelationModels ){
+        return createRelationRecord.call(bus,relationCollection, relationDef, savedRelationModels, newModel,models).then(function(){
+          return updateCaches.call( bus, relationDef, savedRelationModels, newModel, models).then(function(){
+            return newModel[relationDef.name] = relationDef.multiple ? savedRelationModels : savedRelationModels.pop()
+          })
+        })
+      })
+    })
+
+
   }
+}
+
+function checkRelationMultiple( multiple, relationCollection, relationModelName, relationModels, models){
+  //console.log("checkRelationMultiple")
+  if( multiple ) return Promise.resolve()
+
+  var bus = this
+  return Promise.all(relationModels.map(function( relationModel){
+    if( !relationModel.id ) return
+    return models[relationCollection].findOne(_.zipObject([relationModelName],[relationModel.id])).then(function( record){
+      if( record ) return Promise.reject( bus.error(406, relationModelName+" cannot have multiple relation"))
+    })
+  }))
+}
+
+function createRelationModels( relationDef, relationModels, models){
+  //console.log( "createRelationModels",relationModels)
+  return Promise.all( relationModels.map(function(relationModel){
+    //console.log( relationModel, relationDef.model)
+    if( relationModel.id ) return models[relationDef.model].findOne( relationModel.id)
+
+    if( !relationDef.index ) return models[relationDef.model].create( relationModel)
+
+    return models[relationDef.model].findOne(_.zipObject([relationDef.index],[relationModel[relationDef.index]])).then(function( foundRelationModel){
+      return foundRelationModel ? foundRelationModel : models[relationDef.model].create( relationModel)
+    })
+  })).then(function( savedRelationModels){
+    return _.filter(savedRelationModels, _.isObject)
+  })
+}
+
+function createRelationRecord( relationCollection, relationDef, relationModels, modelIns, models){
+  return Promise.all( relationModels.map(function( relationModel ){
+    return models[relationCollection].find(  _.zipObject([relationDef.model, relationDef.reverse.model],[relationModel.id,modelIns.id])).then(function(record){
+      console.log( "createRelationRecord",relationCollection,_.zipObject([relationDef.model, relationDef.reverse.model],[relationModel.id,modelIns.id]))
+      if( record.length ) return record
+      return models[relationCollection].create(  _.zipObject([relationDef.model, relationDef.reverse.model],[relationModel.id,modelIns.id]))
+    })
+  }))
+}
+
+function updateCaches(relationDef, relationModels, modelIns, models){
+  var updateModelIns = _.pick( modelIns, [relationDef.name])
+  if( relationDef.multiple ){
+    updateModelIns[relationDef.name] = _.pluck(relationModels,"id")
+  }else{
+    updateModelIns[relationDef.name] = relationModels[0].id
+  }
+  //update cache to model
+  //console.log( "updateCaches",relationModels,updateModelIns)
+
+  return models[relationDef.reverse.model].update( {id: modelIns.id}, updateModelIns).then(function(){
+
+    return Promise.all( relationModels.map(function( relationModel){
+      var updateRelationModel = _.pick( relationModel,[relationDef.reverse.name])
+      if( relationDef.reverse.multiple ) {
+
+        updateRelationModel[relationDef.reverse.name] = _.uniq((relationModel[relationDef.reverse.name]||[]).concat(modelIns.id))
+      }else{
+        updateRelationModel[relationDef.reverse.name] = modelIns.id
+      }
+      //console.log( "updateCaches",relationDef.model,updateRelationModel)
+
+
+      return models[relationDef.model].update( {id:relationModel.id}, updateRelationModel)
+    }))
+  })
+}
+
+function deleteRelationRecord(relationCollection, relationDef, savedRelationModels, updatedModel, models ){
+  var bus = this
+
+  return models[relationCollection].find(_.zipObject( [relationDef.reverse.model], [updatedModel.id])).then( function(relationRecords){
+    //console.log("deleteRelationRecord",relationCollection,_.zipObject( [relationDef.reverse.model], [updatedModel.id]), relationRecords)
+
+    var savedRelationModelIds = _.pluck( savedRelationModels, "id"),
+      needDeleteRelations = relationRecords.filter( function( relationRecord){ return savedRelationModelIds.indexOf( relationRecord[relationDef.model] )})
+
+    //console.log("deleteRelationRecord",relationRecords,savedRelationModelIds,needDeleteRelations)
+    return Promise.all( needDeleteRelations.map(function( needDeleteRelation){
+      return models[relationCollection].destroy({id:needDeleteRelation.id}).then(function(){
+        return models[relationDef.model].findOne(needDeleteRelation[relationDef.model]).then(function( relationModel){
+          if( !relationModel ) return console.log( relationDef.model,needDeleteRelation[relationDef.model],"not exist")
+          var updateRelationModel  = _.pick(relationModel,['id',relationDef.reverse.name])
+
+          if( relationDef.reverse.multiple ){
+            updateRelationModel[relationDef.reverse.name] = _.without([].concat(updateRelationModel[relationDef.reverse.name]) ,updatedModel.id)
+          }else if( updateRelationModel[relationDef.reverse.name] == updatedModel.id ){
+            updateRelationModel[relationDef.reverse.name] = null
+          }
+          //console.log("delete relation field in relation model", relationDef.model,updateRelationModel)
+          return models[relationDef.model].update( {id:relationModel.id}, updateRelationModel )
+        })
+      })
+    }))
+  })
 }
 
 function generateAfterUpdateCallback(modelName, relationDef, models) {
   var root = this
   return function handlerRelationAfterModelUpdate( updatedModels, criteria, updateObj ) {
+    var bus = this
+    if( !updateObj[relationDef.name] || updatedModels.length ==0 ) return
+    if( updatedModels.length >1 && updateObj[relationDef.name]) return bus.error(406, "can not update relation of multiple record")
 
-    if( !updateObj[relationDef.name] ) return
     logger.log("updating relation", relationDef.name)
 
-    var relationModels = updateObj[relationDef.name],
-      relationCollection = makeCollectionName(modelName, relationDef),
-      bus = this
+    var relationModels = standardRelationModels([].concat(updateObj[relationDef.name])),
+      updatedModel = updatedModels[0],
+      relationCollection = makeCollectionName(modelName, relationDef)
 
     //1. validate multiple
     if( !relationDef.multiple && _.isArray( relationModels )) {
       return bus.error(406, 'relation not allow multiple for ' + relationDef.name + ' in ' + modelName)
     }
 
-    //we make it an array just for convinience to use promise `all` method
-    relationModels = [].concat(relationModels)
+    if( relationDef.auth.indexOf( 'write') == -1 ){
+      relationModels = _.filter(relationModels,"id")
+    }
 
-    //console.log("===========",relationModels,_.map(relationModels,function( relationModel){ return _.isObject( relationModel) ? relationModel.id : relationModel }))
-    var relationsIds = _.uniq(_.compact(_.map(relationModels,function( relationModel){ return _.isObject( relationModel) ? relationModel.id : relationModel })).map(function(r){return r.toString()}))
-
-    return Promise.all( updatedModels.map(function( updatedModel){
-
-      return models[relationCollection].find(_.zipObject([modelName],[ updatedModel.id])).then(function( records ){
-        var existsIds = _.pluck( records, relationDef.model).map(function(r){return r.toString()})
-        var needDeleteRecordIds = _.without.apply( _, [existsIds].concat( relationsIds) )
-        var notExistsRelationModels = _.filter(relationModels, function(model){
-          var id = _.isObject(model) ? model.id : model
-          return !id || existsIds.indexOf( id.toString()) ==-1
-        })
-
-        //console.log( records)
-        //console.log( relationsIds,notExistsRelationModels, needDeleteRecordIds, existsIds)
-        if( needDeleteRecordIds.length ){
-          return models[relationCollection].destroy({id: needDeleteRecordIds}).then(function(){
-            return buildRelation.call(root,notExistsRelationModels,relationDef,relationCollection,modelName,updatedModel,bus, models)
+    return checkRelationMultiple.call(relationDef.reverse.multiple, relationCollection, relationDef.model, relationModels, models).then(function(){
+      return createRelationModels.call(bus,  relationDef, relationModels,models).then(function( savedRelationModels ){
+        return createRelationRecord.call(bus,relationCollection, relationDef, savedRelationModels, updatedModel, models).then(function(){
+          return deleteRelationRecord.call( bus,relationCollection, relationDef, savedRelationModels, updatedModel,models).then(function(){
+            return updateCaches.call( bus, relationDef, savedRelationModels, updatedModel,models).then(function(){
+              return updatedModel[relationDef.name] = relationDef.multiple ? savedRelationModels : savedRelationModels.pop()
+            })
           })
-        }else{
-          return buildRelation.call(root,notExistsRelationModels,relationDef,relationCollection,modelName,updatedModel,bus, models)
-        }
-
-      })
-    }))
-  }
-}
-
-
-function buildRelation(relationModels,relationDef,relationCollection,modelName,modelIns,bus, models ){
-  return Promise.all( relationModels.map(function ( relationModel ) {
-    if( _.isString(relationModel) || _.isNumber(relationModel) ){
-      relationModel = {id : relationModel}
-    }
-
-    //may need to build an new relation object
-    //validate read write auth and create a new relation object
-    if ( !relationModel.id && relationDef.auth.indexOf('write') !==-1 ) {
-      //logger.log("relation","creating new relation object", relationDef, relationModel )
-
-      return bus.fire( relationDef.model+".create", relationModel).then(function ( fireResult) {
-        var savedRelationModal =fireResult['model.create.'+relationDef.model]
-        //logger.log("relation"," create new relation object done ", savedRelationModal)
-        //save the relation to relation collection
-        return createRelationCollectionAndUpdateCaches(savedRelationModal,relationDef,relationCollection,modelName,modelIns,bus, models)
-        //return bus.fire( relationCollection+".create", _.zipObject([modelName,relationDef.model],[modelIns.id,savedRelationModal.id]))
-      })
-
-    //user exist relation object
-    }else if( relationModel.id){
-      logger.log("index","use old relation", relationDef.name)
-
-      //check if reverse model have multiple limit
-      if( relationDef.reverse && !relationDef.reverse.multiple){
-        var findRelationObj = {}
-        findRelationObj[relationDef.model] = relationModel.id
-        return bus.fire( relationCollection+".findOne", findRelationObj).then(function( fireResult){
-          var foundRelation = fireResult['model.findOne'+relationCollection]
-          if( foundRelation ){
-            return logger.error("relation already exists", foundRelation)
-          }else{
-            return createRelationCollectionAndUpdateCaches(relationModel,relationDef,relationCollection,modelName,modelIns,bus, models)
-            //return bus.fire( relationCollection+".create", _.zipObject([modelName,relationDef.model],[modelIns.id,relationModel.id]))
-          }
         })
-      }else{
-        return createRelationCollectionAndUpdateCaches(relationModel,relationDef,relationCollection,modelName,modelIns,bus, models)
-        //return bus.fire( relationCollection+".create", _.zipObject([modelName,relationDef.model],[modelIns.id,relationModel.id]))
-      }
-
-    }else{
-      //ignore but continue
-      return logger.error("you do not have right to create new relation object", relationModel)
-    }
-  }).filter( isPromiseAlike ))
-}
-
-
-function createRelationCollectionAndUpdateCaches( relationModel,relationDef,relationCollection,modelName,modelIns,bus, models){
-  //create relation record
-  return models[relationDef.model].findOne( relationModel.id).then(function( relationModel){
-    return bus.fire( relationCollection+".create", _.zipObject([modelName,relationDef.model],[modelIns.id,relationModel.id])).then(function(createResult){
-
-      var updateModelIns = _.pick( modelIns, [relationDef.name])
-      if( relationDef.multiple ){
-        updateModelIns[relationDef.name] = _.uniq((updateModelIns[relationDef.name]||[]).concat(relationModel.id))
-      }else{
-        updateModelIns[relationDef.name] = relationModel.id
-      }
-      //update cache to model
-      return models[modelName].update(modelIns.id,updateModelIns).then(function(){
-        var updateRelationModel = _.pick( relationModel,[relationDef.reverse.name])
-        //update cache to relation model
-
-        if( relationDef.reverse.multiple ) {
-          updateRelationModel[relationDef.reverse.name] = _.uniq((updateRelationModel[relationDef.reverse.name] || []).concat(relationModel.id))
-        }else{
-          updateRelationModel[relationDef.reverse.name] = relationModel.id
-        }
-        return models[relationDef.model].update( relationModel.id, updateRelationModel)
       })
     })
-  })
+  }
 }
 
 
@@ -275,10 +304,7 @@ var relationModule = {
                 model : model.identity,
                 //name : reverse must have a name
                 auth : ['read'],
-                reverse : {
-                  name : relationDef.name,
-                  model : relationDef.model
-                },
+                reverse : _.cloneDeep(_.omit( relationDef,"reverse")),
                 multiple : false
               })
               root.indexes[relationDef.model] = (root.indexes[relationDef.model]||[]).concat(reverseRelationDef)
@@ -289,7 +315,8 @@ var relationModule = {
               root.models[relationCollection] = {
                 identity : relationCollection,
                 attributes : {},
-                connection : root.config.connection
+                connection : root.config.connection,
+                rest : true
               }
             }
           })
