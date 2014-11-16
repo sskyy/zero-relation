@@ -211,6 +211,7 @@ function generateBeforeModelFindHandler( modelName, relationDef, models){
 
       var replacePromise = models[relationDef.model].find(criteria[relationDef.name]).then(function( relationModels ){
         var relationIds = _.pluck( relationModels,"id")
+        if( !relationIds.length) return bus.error(404,"model not found with relations")
 
         return models[relationCollection].find(_.zipObject([relationDef.model],relationIds)).then(function( relations){
           var modelIds = _.pluck( relations, modelName )
