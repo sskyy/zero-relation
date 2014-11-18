@@ -301,13 +301,14 @@ var relationModule = {
             root.indexes[model.identity] = (root.indexes[model.identity] || []).concat(relationDef)
 
             if( relationDef.reverse ){
-              var reverseRelationDef = _.defaults(_.cloneDeep(relationDef.reverse),{
+              relationDef.reverse = _.defaults(relationDef.reverse,{
                 model : model.identity,
                 //name : reverse must have a name
                 auth : ['read'],
                 reverse : _.cloneDeep(_.omit( relationDef,"reverse")),
                 multiple : false
               })
+              var reverseRelationDef = _.cloneDeep( relationDef.reverse )
               root.indexes[relationDef.model] = (root.indexes[relationDef.model]||[]).concat(reverseRelationDef)
             }
 
