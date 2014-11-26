@@ -1,6 +1,6 @@
 {
   "name": "zero-relation",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "description": "zero module",
   "zero": {
     "dependencies": {
