@@ -1,6 +1,6 @@
 # zero-relation #
 
-This module user middle-collection to help you make relation between to models.
+This module use middle-collection to make relation between to models.
 
 ## Usage ##
 

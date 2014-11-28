@@ -1,7 +1,10 @@
 {
   "name": "zero-relation",
-  "version": "0.0.9",
-  "description": "zero module",
+  "version": "0.0.10",
+  "keywords": [
+    "zero module"
+  ],
+  "description": "This module use middle-collection to make relation between to models.",
   "zero": {
     "dependencies": {
       "model": "^0.0.1",
